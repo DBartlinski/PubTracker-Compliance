@@ -1,0 +1,9 @@
+# Dimensions exports may not be redistributed (see export header)
+Dimensions-data/
+data/
+reports/
+site/data/
+.venv/
+__pycache__/
+.pytest_cache/
+.env
