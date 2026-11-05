@@ -1,7 +1,9 @@
-name: Deploy site to GitHub Pages
+name: Build and deploy public site (PubMed + OpenAlex only)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * *"
 
 permissions:
   contents: read
@@ -18,8 +20,25 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      # Dimensions data may not be redistributed; the public build never reads it.
+      VADAILY_NO_DIMENSIONS: "1"
+      OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+      NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # Keeps first-seen dates so the "Added" day pills stay accurate between runs.
+      - uses: actions/cache@v4
+        with:
+          path: data
+          key: vadaily-db-${{ github.run_id }}
+          restore-keys: vadaily-db-
+      - run: python -m vadaily.pipeline
       - uses: actions/configure-pages@v5
         with:
           enablement: true

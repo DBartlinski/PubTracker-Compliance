@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 from datetime import date, datetime, timedelta
 
 from . import funding, journals, store
@@ -57,9 +58,14 @@ def run(cfg=None, log=print):
     summary = {"started": started, "start_date": start_date.isoformat(), "sources": {}, "warnings": []}
     status = "error"
     try:
-        dims, files = dimensions_csv.load_folder(path_for(cfg, "dimensions_folder"))
+        if os.environ.get("VADAILY_NO_DIMENSIONS"):
+            dims, files = [], []
+        else:
+            dims, files = dimensions_csv.load_folder(path_for(cfg, "dimensions_folder"))
         summary["sources"]["dimensions"] = {"records": len(dims), "files": files}
-        if not files:
+        if os.environ.get("VADAILY_NO_DIMENSIONS"):
+            pass
+        elif not files:
             summary["warnings"].append("No Dimensions CSV files found in the Dimensions folder.")
         elif any(f["rows"] >= 500 for f in files[:1]):
             summary["warnings"].append("Newest Dimensions export has 500 rows (export cap); some records may be missing.")
