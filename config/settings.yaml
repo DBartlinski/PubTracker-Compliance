@@ -15,6 +15,7 @@ paths:
 
 server:
   port: 5000
+  auto_refresh_hours: 6  # 0 disables the background refresh
 
 pubmed:
   enabled: true
