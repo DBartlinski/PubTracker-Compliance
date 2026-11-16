@@ -1,13 +1,12 @@
 import csv
 import json
-import os
 from datetime import date, datetime, timedelta
 
 from . import funding, journals, store
 from .config import load_config, path_for
 from .records import canonical_key, group_records, merge_records
 from .scoring import Scorer
-from .sources import dimensions_csv, openalex, pubmed
+from .sources import crossref, dimensions_csv, openalex, pubmed
 
 
 def _now():
@@ -22,7 +21,7 @@ def coverage(records):
     lo = min(dims_dates)
     window = [r for r in records if r["pub_date"] >= lo]
     in_dims = [r for r in window if "dimensions" in r["sources"]]
-    both = [r for r in in_dims if {"pubmed", "openalex"} & set(r["sources"])]
+    both = [r for r in in_dims if {"pubmed", "openalex", "crossref"} & set(r["sources"])]
     free_only = [r for r in window if "dimensions" not in r["sources"]]
     stats = {
         "window_start": lo,
@@ -48,6 +47,19 @@ def _write_coverage_csv(path, window):
                         r.get("doi"), r.get("pmid"), r.get("dimensions_id"), r.get("openalex_id")])
 
 
+def _without_dimensions(stored):
+    """Remove Dimensions as a source from stored records; drop records that came only from Dimensions."""
+    out = []
+    for r in stored:
+        srcs = [s for s in r.get("sources") or [] if s != "dimensions"]
+        if not srcs:
+            continue
+        r["sources"] = srcs
+        r["dimensions_id"] = r["dimensions_url"] = None
+        out.append(r)
+    return out
+
+
 def run(cfg=None, log=print):
     cfg = cfg or load_config()
     started = _now()
@@ -58,17 +70,16 @@ def run(cfg=None, log=print):
     summary = {"started": started, "start_date": start_date.isoformat(), "sources": {}, "warnings": []}
     status = "error"
     try:
-        if os.environ.get("VADAILY_NO_DIMENSIONS"):
-            dims, files = [], []
-        else:
+        ingest_dims = bool(cfg.get("dimensions", {}).get("ingest"))
+        if ingest_dims:
             dims, files = dimensions_csv.load_folder(path_for(cfg, "dimensions_folder"))
-        summary["sources"]["dimensions"] = {"records": len(dims), "files": files}
-        if os.environ.get("VADAILY_NO_DIMENSIONS"):
-            pass
-        elif not files:
-            summary["warnings"].append("No Dimensions CSV files found in the Dimensions folder.")
-        elif any(f["rows"] >= 500 for f in files[:1]):
-            summary["warnings"].append("Newest Dimensions export has 500 rows (export cap); some records may be missing.")
+            summary["sources"]["dimensions"] = {"records": len(dims), "files": files}
+            if not files:
+                summary["warnings"].append("No Dimensions CSV files found in the Dimensions folder.")
+            elif any(f["rows"] >= 500 for f in files[:1]):
+                summary["warnings"].append("Newest Dimensions export has 500 rows (export cap); some records may be missing.")
+        else:
+            dims = []
         pieces = list(dims)
 
         since = max(start_date, today - timedelta(days=int(cfg.get("lookback_days", 45))))
@@ -87,10 +98,20 @@ def run(cfg=None, log=print):
             except Exception as e:
                 summary["warnings"].append(f"OpenAlex failed: {e}")
 
+        if cfg.get("crossref", {}).get("enabled"):
+            try:
+                recs = crossref.fetch(cfg, since, today, log)
+                pieces += recs
+                summary["sources"]["crossref"] = {"records": len(recs), "since": since.isoformat()}
+            except Exception as e:
+                summary["warnings"].append(f"Crossref failed: {e}")
+
         for p in pieces:
             p["_stored"] = False
             p["first_seen"] = started
         stored = store.load_records(con)
+        if not ingest_dims:
+            stored = _without_dimensions(stored)
         for r in stored:
             r["_stored"] = True
 
@@ -104,8 +125,12 @@ def run(cfg=None, log=print):
         tiers = journals.JournalTiers(cfg["scoring"]["journal_tiers"], store.load_journals(con))
 
         kept = []
+        dropped = 0
         for r in merged:
             r.update(funding.classify(r))
+            if cfg.get("require_va_evidence") and not (r["va_trusted"] or r["va_affiliated"] or r["va_funded"]):
+                dropped += 1
+                continue
             r["journal_tier"], r["journal_citedness"] = tiers.assign(r)
             r["score"], r["tier"], r["score_reasons"] = scorer.score(r)
             r["key"] = canonical_key(r)
@@ -124,6 +149,7 @@ def run(cfg=None, log=print):
             "new": sum(r["is_new"] for r in kept),
             "tiers": {t: sum(r["tier"] == t for r in kept) for t in ("High", "Medium", "Low")},
             "journal_tiers": {t: sum(r["journal_tier"] == t for r in kept) for t in journals.TIERS},
+            "dropped_no_va_evidence": dropped,
             "coverage": cov,
         })
         status = "ok"
